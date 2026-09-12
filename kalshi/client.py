@@ -1,7 +1,12 @@
 import os
-import time
 import requests
-from typing import Optional, List, Iterator
+from typing import Optional, List
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from .models import Market, OrderBook, Order, Position, Trade, Event
 
