@@ -42,14 +42,21 @@ class RobinhoodClient:
                 "Set ROBINHOOD_USERNAME and ROBINHOOD_PASSWORD env vars."
             )
 
-        mfa_code = pyotp.TOTP(mfa_secret).now() if mfa_secret else None
+        # Accept either a raw TOTP secret (generate code) or a pre-generated
+        # 6-digit code injected by 1Password's op run OTP field injection.
+        raw_code = os.getenv("ROBINHOOD_MFA_CODE")
+        if raw_code:
+            mfa_code = raw_code.strip()
+        elif mfa_secret:
+            mfa_code = pyotp.TOTP(mfa_secret).now()
+        else:
+            mfa_code = None
 
         rh.login(
             username=username,
             password=password,
             mfa_code=mfa_code,
             store_session=True,
-            by_sms=False,
         )
 
     # ------------------------------------------------------------------
