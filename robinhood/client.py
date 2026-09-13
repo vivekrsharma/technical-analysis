@@ -75,9 +75,17 @@ class RobinhoodClient:
             symbol = p["currency"]["code"]
             name   = p["currency"]["name"]
 
+            # Use clearing_book_cost_basis (covers all tax lots incl. rewards/transfers)
+            # Fall back to direct_cost_basis if unavailable
+            tax_lots   = p.get("tax_lot_cost_bases", [{}])
             cost_bases = p.get("cost_bases", [{}])
-            cost_basis = float(cost_bases[0].get("direct_cost_basis", 0)) if cost_bases else 0
-            avg_buy    = cost_basis / qty if qty else 0
+            if tax_lots and tax_lots[0].get("clearing_book_cost_basis"):
+                cost_basis = float(tax_lots[0]["clearing_book_cost_basis"])
+            elif cost_bases:
+                cost_basis = float(cost_bases[0].get("direct_cost_basis", 0))
+            else:
+                cost_basis = 0.0
+            avg_buy = cost_basis / qty if qty else 0
 
             quote         = rh.crypto.get_crypto_quote(symbol)
             current_price = float(quote.get("mark_price", 0)) if quote else 0
@@ -114,7 +122,7 @@ class RobinhoodClient:
         symbol: e.g. 'BTC', 'ETH' — filters by currency pair
         state:  'filled' | 'canceled' | 'partially_filled' | 'pending'
         """
-        raw = rh.crypto.get_all_crypto_orders() or []
+        raw = rh.orders.get_all_crypto_orders() or []
         orders = []
         for o in raw:
             sym = _symbol_from_pair(o.get("currency_pair_id", ""))
@@ -125,7 +133,7 @@ class RobinhoodClient:
 
             orders.append(CryptoOrder(
                 order_id=o.get("id", ""),
-                symbol=sym,
+                symbol=sym or o.get("currency_code", ""),
                 side=o.get("side", ""),
                 order_type=o.get("type", ""),
                 state=o.get("state", ""),
@@ -133,7 +141,7 @@ class RobinhoodClient:
                 filled_quantity=float(o.get("cumulative_quantity", 0)),
                 price=_optional_float(o.get("price")),
                 average_price=_optional_float(o.get("average_price")),
-                total_notional=float(o.get("rounded_executed_notional", 0)),
+                total_notional=float(o.get("rounded_executed_notional", 0) or 0),
                 created_at=_parse_dt(o.get("created_at")),
                 updated_at=_parse_dt(o.get("updated_at")),
             ))
