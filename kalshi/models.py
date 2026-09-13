@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Optional, List
 from datetime import datetime
@@ -6,6 +7,7 @@ from datetime import datetime
 def _parse_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
+    s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
