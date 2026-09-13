@@ -10,12 +10,19 @@ import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from kalshi import KalshiClient
+
+CT = ZoneInfo("America/Chicago")
 
 
 def parse_dt(s):
     s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def to_ct(dt: datetime) -> datetime:
+    return dt.astimezone(CT)
 
 
 def paginate(session, url, key, limit=100):
@@ -77,14 +84,14 @@ def build_data(c):
 
         ticker_fills = fills_by_ticker.get(s["ticker"], [])
         if ticker_fills:
-            earliest     = min(ticker_fills, key=lambda f: f["created_time"])
-            placed_dt    = parse_dt(earliest["created_time"])
-            placed_str   = placed_dt.strftime("%H:%M")
+            earliest      = min(ticker_fills, key=lambda f: f["created_time"])
+            placed_dt     = to_ct(parse_dt(earliest["created_time"]))
+            placed_str    = placed_dt.strftime("%H:%M CT")
             yes_contracts = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "yes"), 2)
             no_contracts  = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "no"),  2)
         else:
             placed_str    = "—"
-            placed_dt     = parse_dt(s["settled_time"])
+            placed_dt     = to_ct(parse_dt(s["settled_time"]))
             yes_contracts = round(yes_qty, 2)
             no_contracts  = round(no_qty,  2)
 
@@ -96,7 +103,7 @@ def build_data(c):
             "mkt_title":       mkt.get("title", s["ticker"]),
             "mkt_volume":      mkt.get("volume", 0),
             "mkt_oi":          mkt.get("oi", 0),
-            "settled":         parse_dt(s["settled_time"]).strftime("%Y-%m-%d %H:%M"),
+            "settled":         to_ct(parse_dt(s["settled_time"])).strftime("%Y-%m-%d %H:%M CT"),
             "placed":          placed_str,
             "placed_hour":     placed_dt.hour,
             "placed_date":     placed_dt.strftime("%Y-%m-%d"),
@@ -263,14 +270,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="chart-wrap"><canvas id="cumulChart"></canvas></div>
   </div>
   <div class="chart-box">
-    <h2>P&amp;L by Hour (UTC)</h2>
+    <h2>P&amp;L by Hour (CT)</h2>
     <div class="chart-wrap"><canvas id="hourChart"></canvas></div>
   </div>
 </div>
 
 <div class="charts">
   <div class="chart-box">
-    <h2>Win Rate by Hour (UTC)</h2>
+    <h2>Win Rate by Hour (CT)</h2>
     <div class="chart-wrap"><canvas id="winRateChart"></canvas></div>
   </div>
   <div class="chart-box">
@@ -507,7 +514,7 @@ def main():
     pnl_str   = ("+$" if data["total_pnl"] >= 0 else "-$") + f"{abs(data['total_pnl']):.2f}"
 
     html = HTML_TEMPLATE.replace("{{data_json}}", json.dumps(data))
-    html = html.replace("{{generated_at}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    html = html.replace("{{generated_at}}", datetime.now(CT).strftime("%Y-%m-%d %H:%M CT"))
     html = html.replace("{{balance}}",      str(data["balance"]))
     html = html.replace("{{pnl_class}}",    pnl_class)
     html = html.replace("{{total_pnl_str}}", pnl_str)
