@@ -1,6 +1,10 @@
 import os
+import base64
+import time
 import requests
+import requests.auth
 from typing import Optional, List
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -8,9 +12,42 @@ try:
 except ImportError:
     pass
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+
 from .models import Market, OrderBook, Order, Position, Trade, Event
 
-BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+
+class _RsaAuth(requests.auth.AuthBase):
+    """Signs each request with RSA-PSS using Kalshi's header scheme."""
+
+    def __init__(self, key_id: str, private_key_pem: str):
+        self.key_id = key_id
+        self.private_key = serialization.load_pem_private_key(
+            private_key_pem.encode() if isinstance(private_key_pem, str) else private_key_pem,
+            password=None,
+        )
+
+    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
+        timestamp = str(int(time.time() * 1000))
+        path = urlparse(r.url).path
+        message = (timestamp + r.method.upper() + path).encode()
+
+        signature = self.private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+
+        r.headers["KALSHI-ACCESS-KEY"] = self.key_id
+        r.headers["KALSHI-ACCESS-SIGNATURE"] = base64.b64encode(signature).decode()
+        r.headers["KALSHI-ACCESS-TIMESTAMP"] = timestamp
+        return r
 
 
 class KalshiError(Exception):
@@ -23,17 +60,23 @@ class KalshiClient:
     """
     Client for the Kalshi REST API v2.
 
-    Authenticate with either an API key or email/password:
-        client = KalshiClient(api_key="your-key")
+    RSA key auth (recommended — matches Kalshi API key flow):
+        client = KalshiClient()  # reads KALSHI_KEY_ID + KALSHI_PRIVATE_KEY from env
+
+    Email/password auth:
         client = KalshiClient(email="you@example.com", password="secret")
 
-    Credentials are read from env vars if not passed directly:
-        KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD
+    Env vars:
+        KALSHI_KEY_ID       — API key ID (UUID from Kalshi dashboard)
+        KALSHI_PRIVATE_KEY  — RSA private key PEM string
+        KALSHI_EMAIL        — account email (fallback)
+        KALSHI_PASSWORD     — account password (fallback)
     """
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        key_id: Optional[str] = None,
+        private_key: Optional[str] = None,
         email: Optional[str] = None,
         password: Optional[str] = None,
         base_url: str = BASE_URL,
@@ -42,18 +85,19 @@ class KalshiClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
-        api_key = api_key or os.getenv("KALSHI_API_KEY")
+        key_id = key_id or os.getenv("KALSHI_KEY_ID")
+        private_key = private_key or os.getenv("KALSHI_PRIVATE_KEY")
         email = email or os.getenv("KALSHI_EMAIL")
         password = password or os.getenv("KALSHI_PASSWORD")
 
-        if api_key:
-            self.session.headers["Authorization"] = api_key
+        if key_id and private_key:
+            self.session.auth = _RsaAuth(key_id, private_key)
         elif email and password:
             self._login(email, password)
         else:
             raise ValueError(
-                "Provide api_key or email+password, "
-                "or set KALSHI_API_KEY / KALSHI_EMAIL + KALSHI_PASSWORD env vars."
+                "Set KALSHI_KEY_ID + KALSHI_PRIVATE_KEY, "
+                "or KALSHI_EMAIL + KALSHI_PASSWORD env vars."
             )
 
     # ------------------------------------------------------------------
@@ -294,10 +338,7 @@ class KalshiClient:
     def cancel_all_orders(self, ticker: Optional[str] = None) -> List[Order]:
         """Cancel all resting orders, optionally filtered by ticker."""
         open_orders = self.get_orders(ticker=ticker, status="resting")
-        canceled = []
-        for order in open_orders:
-            canceled.append(self.cancel_order(order.order_id))
-        return canceled
+        return [self.cancel_order(o.order_id) for o in open_orders]
 
     # ------------------------------------------------------------------
     # Helpers
