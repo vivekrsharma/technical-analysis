@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from kalshi import KalshiClient
 
@@ -43,6 +44,24 @@ def build_data(c):
     for f in fills_raw:
         fills_by_ticker[f["market_ticker"]].append(f)
 
+    # Fetch market data (volume + open interest) for every settlement ticker in parallel
+    unique_tickers = list({s["ticker"] for s in settlements})
+    def fetch_market(ticker):
+        r = c.session.get(f"{base}/markets/{ticker}")
+        m = r.json().get("market", {}) if r.ok else {}
+        return ticker, {
+            "title":    m.get("title", ticker),
+            "volume":   round(float(m.get("volume_fp", 0)), 2),
+            "oi":       round(float(m.get("open_interest_fp", 0)), 2),
+        }
+
+    market_data = {}
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(fetch_market, t): t for t in unique_tickers}
+        for fut in as_completed(futures):
+            ticker, info = fut.result()
+            market_data[ticker] = info
+
     rows = []
     for s in sorted(settlements, key=lambda x: x["settled_time"], reverse=True):
         yes_qty = float(s.get("yes_count_fp", 0))
@@ -71,8 +90,12 @@ def build_data(c):
 
         total_contracts = round(yes_contracts + no_contracts, 2)
 
+        mkt = market_data.get(s["ticker"], {})
         rows.append({
             "ticker":          s["ticker"],
+            "mkt_title":       mkt.get("title", s["ticker"]),
+            "mkt_volume":      mkt.get("volume", 0),
+            "mkt_oi":          mkt.get("oi", 0),
             "settled":         parse_dt(s["settled_time"]).strftime("%Y-%m-%d %H:%M"),
             "placed":          placed_str,
             "placed_hour":     placed_dt.hour,
@@ -259,9 +282,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <thead>
       <tr>
         <th>Settled</th><th>Placed</th><th>Ticker</th>
-        <th>Result</th><th>Side</th>
-        <th class="num">YES Cts</th><th class="num">NO Cts</th><th class="num">Total Cts</th><th class="num">$ Placed</th>
-        <th class="num">Payout</th><th class="num">P&amp;L</th>
+        <th>Market</th><th>Result</th><th>Side</th>
+        <th class="num">YES Cts</th><th class="num">NO Cts</th><th class="num">Total Cts</th>
+        <th class="num">Mkt Volume</th><th class="num">Open Interest</th>
+        <th class="num">$ Placed</th><th class="num">Payout</th><th class="num">P&amp;L</th>
       </tr>
     </thead>
     <tbody id="betsBody"></tbody>
@@ -283,11 +307,14 @@ DATA.rows.forEach(r => {
       <td class="muted">${r.settled}</td>
       <td class="muted">${r.placed}</td>
       <td>${r.ticker}</td>
+      <td class="muted" style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${r.mkt_title}">${r.mkt_title}</td>
       <td><span class="badge ${r.won ? 'win' : 'loss'}">${r.result}</span></td>
       <td><span class="tag ${r.side === 'NO' ? 'no' : ''}">${r.side}</span></td>
       <td class="num">${r.yes_contracts > 0 ? r.yes_contracts.toFixed(2) : '—'}</td>
       <td class="num">${r.no_contracts  > 0 ? r.no_contracts.toFixed(2)  : '—'}</td>
       <td class="num" style="font-weight:600">${r.total_contracts.toFixed(2)}</td>
+      <td class="num muted">${r.mkt_volume.toLocaleString()}</td>
+      <td class="num muted">${r.mkt_oi.toLocaleString()}</td>
       <td class="num">$${r.placed_usd.toFixed(2)}</td>
       <td class="num">$${r.payout.toFixed(2)}</td>
       <td class="num ${pnlClass}">${pnlStr}</td>
