@@ -58,28 +58,34 @@ def build_data(c):
 
         ticker_fills = fills_by_ticker.get(s["ticker"], [])
         if ticker_fills:
-            earliest   = min(ticker_fills, key=lambda f: f["created_time"])
-            placed_dt  = parse_dt(earliest["created_time"])
-            placed_str = placed_dt.strftime("%H:%M")
-            volume     = sum(float(f["count_fp"]) for f in ticker_fills)
+            earliest     = min(ticker_fills, key=lambda f: f["created_time"])
+            placed_dt    = parse_dt(earliest["created_time"])
+            placed_str   = placed_dt.strftime("%H:%M")
+            yes_contracts = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "yes"), 2)
+            no_contracts  = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "no"),  2)
         else:
-            placed_str = "—"
-            placed_dt  = parse_dt(s["settled_time"])
-            volume     = qty
+            placed_str    = "—"
+            placed_dt     = parse_dt(s["settled_time"])
+            yes_contracts = round(yes_qty, 2)
+            no_contracts  = round(no_qty,  2)
+
+        total_contracts = round(yes_contracts + no_contracts, 2)
 
         rows.append({
-            "ticker":      s["ticker"],
-            "settled":     parse_dt(s["settled_time"]).strftime("%Y-%m-%d %H:%M"),
-            "placed":      placed_str,
-            "placed_hour": placed_dt.hour,
-            "placed_date": placed_dt.strftime("%Y-%m-%d"),
-            "result":      "WIN" if won else "LOSS",
-            "side":        side,
-            "contracts":   round(volume, 2),
-            "placed_usd":  round(cost, 2),
-            "payout":      round(revenue, 2),
-            "pnl":         round(pnl, 2),
-            "won":         won,
+            "ticker":          s["ticker"],
+            "settled":         parse_dt(s["settled_time"]).strftime("%Y-%m-%d %H:%M"),
+            "placed":          placed_str,
+            "placed_hour":     placed_dt.hour,
+            "placed_date":     placed_dt.strftime("%Y-%m-%d"),
+            "result":          "WIN" if won else "LOSS",
+            "side":            side,
+            "yes_contracts":   yes_contracts,
+            "no_contracts":    no_contracts,
+            "total_contracts": total_contracts,
+            "placed_usd":      round(cost, 2),
+            "payout":          round(revenue, 2),
+            "pnl":             round(pnl, 2),
+            "won":             won,
         })
 
     # Cumulative P&L over time
@@ -104,9 +110,10 @@ def build_data(c):
         market_stats[mtype]["wins"] += int(r["won"])
         market_stats[mtype]["pnl"]  += r["pnl"]
 
-    total_pnl  = sum(r["pnl"] for r in rows)
-    total_cost = sum(r["placed_usd"] for r in rows)
-    wins       = sum(1 for r in rows if r["won"])
+    total_pnl       = sum(r["pnl"] for r in rows)
+    total_cost      = sum(r["placed_usd"] for r in rows)
+    total_contracts = round(sum(r["total_contracts"] for r in rows), 2)
+    wins            = sum(1 for r in rows if r["won"])
 
     pos_list = [
         {
@@ -126,8 +133,9 @@ def build_data(c):
         "wins":         wins,
         "losses":       len(rows) - wins,
         "total":        len(rows),
-        "win_rate":     round(wins / len(rows) * 100, 1) if rows else 0,
-        "rows":         rows,
+        "win_rate":        round(wins / len(rows) * 100, 1) if rows else 0,
+        "total_contracts": total_contracts,
+        "rows":            rows,
         "hour_stats":   {str(h): v for h, v in sorted(hour_stats.items())},
         "market_stats": {k: v for k, v in sorted(market_stats.items(), key=lambda x: -x[1]["bets"])},
         "positions":    pos_list,
@@ -217,6 +225,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="card-label">Bets Placed</div>
     <div class="card-value">{{total}}</div>
   </div>
+  <div class="card">
+    <div class="card-label">Total Contracts</div>
+    <div class="card-value blue">{{total_contracts}}</div>
+  </div>
 </div>
 
 <div class="charts">
@@ -248,7 +260,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <tr>
         <th>Settled</th><th>Placed</th><th>Ticker</th>
         <th>Result</th><th>Side</th>
-        <th class="num">Contracts</th><th class="num">$ Placed</th>
+        <th class="num">YES Cts</th><th class="num">NO Cts</th><th class="num">Total Cts</th><th class="num">$ Placed</th>
         <th class="num">Payout</th><th class="num">P&amp;L</th>
       </tr>
     </thead>
@@ -273,7 +285,9 @@ DATA.rows.forEach(r => {
       <td>${r.ticker}</td>
       <td><span class="badge ${r.won ? 'win' : 'loss'}">${r.result}</span></td>
       <td><span class="tag ${r.side === 'NO' ? 'no' : ''}">${r.side}</span></td>
-      <td class="num">${r.contracts.toFixed(2)}</td>
+      <td class="num">${r.yes_contracts > 0 ? r.yes_contracts.toFixed(2) : '—'}</td>
+      <td class="num">${r.no_contracts  > 0 ? r.no_contracts.toFixed(2)  : '—'}</td>
+      <td class="num" style="font-weight:600">${r.total_contracts.toFixed(2)}</td>
       <td class="num">$${r.placed_usd.toFixed(2)}</td>
       <td class="num">$${r.payout.toFixed(2)}</td>
       <td class="num ${pnlClass}">${pnlStr}</td>
@@ -438,7 +452,8 @@ def main():
     html = html.replace("{{losses}}",       str(data["losses"]))
     html = html.replace("{{win_rate}}",     str(data["win_rate"]))
     html = html.replace("{{wr_class}}",     wr_class)
-    html = html.replace("{{total}}",        str(data["total"]))
+    html = html.replace("{{total}}",            str(data["total"]))
+    html = html.replace("{{total_contracts}}", str(data["total_contracts"]))
     html = html.replace("{{positions_section}}", build_positions_section(data["positions"]))
 
     out = os.path.join(tempfile.gettempdir(), "kalshi_dashboard.html")
