@@ -451,11 +451,13 @@ document.querySelectorAll('table').forEach(table => {
       rows.sort((a, b) => {
         const aText = a.cells[col]?.innerText.trim() ?? '';
         const bText = b.cells[col]?.innerText.trim() ?? '';
-        const aNum  = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
-        const bNum  = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
-        let cmp = isNaN(aNum) || isNaN(bNum)
-          ? aText.localeCompare(bText)
-          : aNum - bNum;
+        const sortVal = t => {
+          if (/^\d{4}-\d{2}-\d{2}/.test(t)) return new Date(t.replace(' ', 'T')).getTime();
+          const n = parseFloat(t.replace(/[^0-9.\-]/g, ''));
+          return isNaN(n) ? t : n;
+        };
+        const av = sortVal(aText), bv = sortVal(bText);
+        let cmp = typeof av === 'string' ? av.localeCompare(bv) : av - bv;
         return sortAsc ? cmp : -cmp;
       });
 
