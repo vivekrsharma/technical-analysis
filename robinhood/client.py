@@ -42,8 +42,6 @@ class RobinhoodClient:
                 "Set ROBINHOOD_USERNAME and ROBINHOOD_PASSWORD env vars."
             )
 
-        # Accept either a raw TOTP secret (generate code) or a pre-generated
-        # 6-digit code injected by 1Password's op run OTP field injection.
         raw_code = os.getenv("ROBINHOOD_MFA_CODE")
         if raw_code:
             mfa_code = raw_code.strip()
@@ -59,6 +57,26 @@ class RobinhoodClient:
             store_session=True,
         )
 
+        # Build UUID → symbol map from Robinhood's currency pairs endpoint
+        self._pair_map: dict[str, str] = {}
+        try:
+            pairs = rh.crypto.get_crypto_currency_pairs() or []
+            for pair in pairs:
+                uid    = pair.get("id", "")
+                symbol = pair.get("asset_currency", {}).get("code", "")
+                if uid and symbol:
+                    self._pair_map[uid] = symbol
+        except Exception:
+            pass
+
+    def _resolve_symbol(self, pair_id: str) -> str:
+        """Resolve a currency pair UUID or 'BTC-USD' string to a ticker symbol."""
+        if pair_id in self._pair_map:
+            return self._pair_map[pair_id]
+        if "-" in pair_id and len(pair_id) < 20:
+            return pair_id.split("-")[0]
+        return pair_id
+
     # ------------------------------------------------------------------
     # Positions
     # ------------------------------------------------------------------
@@ -69,23 +87,15 @@ class RobinhoodClient:
         positions = []
         for p in raw:
             qty = float(p.get("quantity", 0))
-            if qty == 0:
+            if qty < 1e-8:
                 continue
 
             symbol = p["currency"]["code"]
             name   = p["currency"]["name"]
 
-            # Use clearing_book_cost_basis (covers all tax lots incl. rewards/transfers)
-            # Fall back to direct_cost_basis if unavailable
-            tax_lots   = p.get("tax_lot_cost_bases", [{}])
             cost_bases = p.get("cost_bases", [{}])
-            if tax_lots and tax_lots[0].get("clearing_book_cost_basis"):
-                cost_basis = float(tax_lots[0]["clearing_book_cost_basis"])
-            elif cost_bases:
-                cost_basis = float(cost_bases[0].get("direct_cost_basis", 0))
-            else:
-                cost_basis = 0.0
-            avg_buy = cost_basis / qty if qty else 0
+            cost_basis = float(cost_bases[0].get("direct_cost_basis", 0)) if cost_bases else 0.0
+            avg_buy    = cost_basis / qty if qty else 0
 
             quote         = rh.crypto.get_crypto_quote(symbol)
             current_price = float(quote.get("mark_price", 0)) if quote else 0
@@ -125,7 +135,7 @@ class RobinhoodClient:
         raw = rh.orders.get_all_crypto_orders() or []
         orders = []
         for o in raw:
-            sym = _symbol_from_pair(o.get("currency_pair_id", ""))
+            sym = self._resolve_symbol(o.get("currency_pair_id", ""))
             if symbol and sym.upper() != symbol.upper():
                 continue
             if state and o.get("state") != state:
@@ -133,7 +143,7 @@ class RobinhoodClient:
 
             orders.append(CryptoOrder(
                 order_id=o.get("id", ""),
-                symbol=sym or o.get("currency_code", ""),
+                symbol=sym,
                 side=o.get("side", ""),
                 order_type=o.get("type", ""),
                 state=o.get("state", ""),
@@ -176,14 +186,11 @@ class RobinhoodClient:
     # ------------------------------------------------------------------
 
     def get_pnl_summary(self) -> dict:
-        """
-        Aggregate P&L across all holdings.
-        Returns realized P&L from filled orders and unrealized from positions.
-        """
+        """Aggregate realized P&L from order history and unrealized from positions."""
         positions = self.get_positions()
         orders    = self.get_orders(state="filled")
 
-        realized = {}
+        realized: dict[str, dict] = {}
         for o in orders:
             sym = o.symbol
             if sym not in realized:
@@ -193,17 +200,24 @@ class RobinhoodClient:
             else:
                 realized[sym]["sell_proceeds"] += o.total_notional
 
-        summary = {}
+        summary: dict[str, dict] = {}
         for sym, vals in realized.items():
             summary[sym] = {
                 "realized_pnl": round(vals["sell_proceeds"] - vals["buy_cost"], 2),
                 "total_bought": round(vals["buy_cost"], 2),
                 "total_sold":   round(vals["sell_proceeds"], 2),
+                "unrealized_pnl":     0.0,
+                "unrealized_pnl_pct": 0.0,
+                "current_value":      0.0,
             }
 
         for p in positions:
             if p.symbol not in summary:
-                summary[p.symbol] = {"realized_pnl": 0.0, "total_bought": 0.0, "total_sold": 0.0}
+                summary[p.symbol] = {
+                    "realized_pnl": 0.0,
+                    "total_bought": 0.0,
+                    "total_sold":   0.0,
+                }
             summary[p.symbol]["unrealized_pnl"]     = p.unrealized_pnl
             summary[p.symbol]["unrealized_pnl_pct"] = p.unrealized_pnl_pct
             summary[p.symbol]["current_value"]       = p.current_value
@@ -217,13 +231,6 @@ class RobinhoodClient:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-def _symbol_from_pair(pair_id: str) -> str:
-    """Currency pair IDs look like 'BTC-USD' or a UUID. Return best-effort symbol."""
-    if "-" in pair_id and len(pair_id) < 20:
-        return pair_id.split("-")[0]
-    return pair_id
-
 
 def _optional_float(val) -> Optional[float]:
     try:
