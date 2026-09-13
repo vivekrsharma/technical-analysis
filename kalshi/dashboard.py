@@ -201,7 +201,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .section h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 16px; }
 
   table { width: 100%; border-collapse: collapse; }
-  th { color: var(--muted); text-align: left; padding: 6px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); text-align: left; padding: 6px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: var(--text); }
+  th.sort-asc::after  { content: ' ↑'; color: var(--blue); }
+  th.sort-desc::after { content: ' ↓'; color: var(--blue); }
   td { padding: 7px 12px; border-bottom: 1px solid rgba(255,255,255,0.04); white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(255,255,255,0.03); }
@@ -427,6 +430,38 @@ new Chart(document.getElementById('marketChart'), {
       y2: { grid: { display: false },    ticks: { color: TICK_COLOR, callback: v => '$'+v }, position: 'right' },
     }
   }
+});
+
+// --- Sortable tables ---
+document.querySelectorAll('table').forEach(table => {
+  const headers = table.querySelectorAll('th');
+  let sortCol = -1, sortAsc = true;
+
+  headers.forEach((th, col) => {
+    th.addEventListener('click', () => {
+      if (sortCol === col) { sortAsc = !sortAsc; }
+      else { sortCol = col; sortAsc = true; }
+
+      headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+      th.classList.add(sortAsc ? 'sort-asc' : 'sort-desc');
+
+      const tbody = table.querySelector('tbody');
+      const rows  = Array.from(tbody.querySelectorAll('tr'));
+
+      rows.sort((a, b) => {
+        const aText = a.cells[col]?.innerText.trim() ?? '';
+        const bText = b.cells[col]?.innerText.trim() ?? '';
+        const aNum  = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+        const bNum  = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+        let cmp = isNaN(aNum) || isNaN(bNum)
+          ? aText.localeCompare(bText)
+          : aNum - bNum;
+        return sortAsc ? cmp : -cmp;
+      });
+
+      rows.forEach(r => tbody.appendChild(r));
+    });
+  });
 });
 </script>
 </body>
