@@ -4,40 +4,17 @@ Run with: op run --env-file=.env -- python3 -m kalshi.dashboard
 """
 import json
 import os
-import re
 import subprocess
 import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from kalshi import KalshiClient
-
-CT = ZoneInfo("America/Chicago")
-
-
-def parse_dt(s):
-    s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+from kalshi.utils import paginate, parse_settlement, norm_dt, CT
 
 
 def to_ct(dt: datetime) -> datetime:
     return dt.astimezone(CT)
-
-
-def paginate(session, url, key, limit=100):
-    results, cursor = [], None
-    while True:
-        params = {"limit": limit}
-        if cursor:
-            params["cursor"] = cursor
-        data = session.get(url, params=params).json()
-        batch = data.get(key, [])
-        results.extend(batch)
-        cursor = data.get("cursor")
-        if not cursor or len(batch) < limit:
-            break
-    return results
 
 
 def build_data(c):
@@ -71,51 +48,40 @@ def build_data(c):
 
     rows = []
     for s in sorted(settlements, key=lambda x: x["settled_time"], reverse=True):
-        yes_qty = float(s.get("yes_count_fp", 0))
-        no_qty  = float(s.get("no_count_fp", 0))
-        result  = s.get("market_result", "")
-        revenue = s.get("revenue", 0) / 100
-
-        side = "YES" if yes_qty > 0 else "NO"
-        qty  = yes_qty if yes_qty > 0 else no_qty
-        cost = float(s.get("yes_total_cost_dollars" if yes_qty > 0 else "no_total_cost_dollars", 0))
-        won  = (side == "YES" and result == "yes") or (side == "NO" and result == "no")
-        pnl  = revenue - cost if won else -cost
+        p = parse_settlement(s)
 
         ticker_fills = fills_by_ticker.get(s["ticker"], [])
         if ticker_fills:
             earliest      = min(ticker_fills, key=lambda f: f["created_time"])
-            placed_dt     = to_ct(parse_dt(earliest["created_time"]))
+            placed_dt     = to_ct(norm_dt(earliest["created_time"]))
             placed_str    = placed_dt.strftime("%H:%M CT")
             yes_contracts = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "yes"), 2)
             no_contracts  = round(sum(float(f["count_fp"]) for f in ticker_fills if f.get("side") == "no"),  2)
         else:
             placed_str    = "—"
-            placed_dt     = to_ct(parse_dt(s["settled_time"]))
-            yes_contracts = round(yes_qty, 2)
-            no_contracts  = round(no_qty,  2)
-
-        total_contracts = round(yes_contracts + no_contracts, 2)
+            placed_dt     = p["settled_ts"]
+            yes_contracts = p["yes_qty"]
+            no_contracts  = p["no_qty"]
 
         mkt = market_data.get(s["ticker"], {})
         rows.append({
-            "ticker":          s["ticker"],
-            "mkt_title":       mkt.get("title", s["ticker"]),
+            "ticker":          p["ticker"],
+            "mkt_title":       mkt.get("title", p["ticker"]),
             "mkt_volume":      mkt.get("volume", 0),
             "mkt_oi":          mkt.get("oi", 0),
-            "settled":         to_ct(parse_dt(s["settled_time"])).strftime("%Y-%m-%d %H:%M CT"),
+            "settled":         p["settled_str"],
             "placed":          placed_str,
             "placed_hour":     placed_dt.hour,
             "placed_date":     placed_dt.strftime("%Y-%m-%d"),
-            "result":          "WIN" if won else "LOSS",
-            "side":            side,
+            "result":          "WIN" if p["won"] else "LOSS",
+            "side":            p["side"],
             "yes_contracts":   yes_contracts,
             "no_contracts":    no_contracts,
-            "total_contracts": total_contracts,
-            "placed_usd":      round(cost, 2),
-            "payout":          round(revenue, 2),
-            "pnl":             round(pnl, 2),
-            "won":             won,
+            "total_contracts": round(yes_contracts + no_contracts, 2),
+            "placed_usd":      p["total_cost"],
+            "payout":          p["payout"],
+            "pnl":             p["pnl"],
+            "won":             p["won"],
         })
 
     # Cumulative P&L over time

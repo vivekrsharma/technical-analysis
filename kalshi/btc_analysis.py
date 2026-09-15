@@ -15,8 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from kalshi.utils import parse_settlement, paginate, norm_dt, CT
 
-CT = ZoneInfo("America/Chicago")
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 
@@ -77,25 +77,8 @@ def fetch_btc_hourly(days: int = 90) -> tuple[list[int], list[float]]:
 
 def fetch_kalshi_data(session) -> list[dict]:
     """Pull all settled bets with fill timestamps."""
-    def paginate(url, key):
-        results, cursor = [], None
-        while True:
-            params = {"limit": 100}
-            if cursor:
-                params["cursor"] = cursor
-            d = session.get(url, params=params).json()
-            results.extend(d.get(key, []))
-            cursor = d.get("cursor")
-            if not cursor or len(d.get(key, [])) < 100:
-                break
-        return results
-
-    settlements = paginate(f"{BASE}/portfolio/settlements", "settlements")
-    fills_raw   = paginate(f"{BASE}/portfolio/fills", "fills")
-
-    def norm_dt(s):
-        s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    settlements = paginate(session, f"{BASE}/portfolio/settlements", "settlements")
+    fills_raw   = paginate(session, f"{BASE}/portfolio/fills", "fills")
 
     fills_by_ticker = defaultdict(list)
     for f in fills_raw:
@@ -103,15 +86,7 @@ def fetch_kalshi_data(session) -> list[dict]:
 
     bets = []
     for s in settlements:
-        yes_qty = float(s.get("yes_count_fp", 0))
-        no_qty  = float(s.get("no_count_fp", 0))
-        result  = s.get("market_result", "")
-        revenue = s.get("revenue", 0) / 100
-        side    = "YES" if yes_qty > 0 else "NO"
-        cost    = float(s.get("yes_total_cost_dollars" if yes_qty > 0 else "no_total_cost_dollars", 0))
-        won     = (side == "YES" and result == "yes") or (side == "NO" and result == "no")
-        pnl     = revenue - cost if won else -cost
-
+        p = parse_settlement(s)
         ticker_fills = fills_by_ticker.get(s["ticker"], [])
         if not ticker_fills:
             continue
@@ -120,13 +95,13 @@ def fetch_kalshi_data(session) -> list[dict]:
         placed_ts = int(placed_dt.timestamp() * 1000)
 
         bets.append({
-            "ticker":    s["ticker"],
+            "ticker":    p["ticker"],
             "placed_ts": placed_ts,
             "placed_ct": placed_dt.astimezone(CT).strftime("%Y-%m-%d %H:%M"),
-            "side":      side,
-            "won":       won,
-            "pnl":       round(pnl, 2),
-            "cost":      round(cost, 2),
+            "side":      p["side"],
+            "won":       p["won"],
+            "pnl":       p["pnl"],
+            "cost":      p["total_cost"],
         })
 
     return bets
